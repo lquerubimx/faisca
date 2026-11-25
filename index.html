@@ -1,0 +1,317 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<meta name="theme-color" content="#000000">
+<title>Faísca</title>
+<style>
+  html,body{margin:0;height:100%;background:#000;color:#cfe8ff;font-family:system-ui,sans-serif;overflow:hidden;touch-action:manipulation}
+  canvas{display:block;width:100vw;height:100vh}
+  #status{position:fixed;left:0;right:0;bottom:18px;text-align:center;font-size:15px;opacity:.75;padding:0 20px;pointer-events:none}
+  #fala{position:fixed;left:0;right:0;top:18px;text-align:center;font-size:16px;opacity:.85;padding:0 24px;pointer-events:none;line-height:1.35}
+  #gear{position:fixed;top:10px;right:10px;width:44px;height:44px;border-radius:22px;border:1px solid #234;background:#0a1420;color:#8ab;font-size:22px;z-index:5}
+  #cfg{position:fixed;inset:0;background:#05090fef;display:none;z-index:10;overflow:auto;padding:20px;box-sizing:border-box}
+  #cfg h2{margin:0 0 14px;font-size:20px}
+  #cfg label{display:block;font-size:14px;margin:14px 0 6px;opacity:.8}
+  #cfg input,#cfg textarea{width:100%;box-sizing:border-box;background:#0d1826;color:#e6f2ff;border:1px solid #2a3f57;border-radius:10px;padding:12px;font-size:16px}
+  #cfg textarea{height:120px;resize:vertical}
+  .row{display:flex;gap:10px;margin-top:20px;flex-wrap:wrap}
+  .row button{flex:1;min-width:120px;padding:14px;border-radius:12px;border:0;font-size:16px;font-weight:600}
+  .ok{background:#2f7cf6;color:#fff}.sec{background:#1b2a3c;color:#cfe8ff}.danger{background:#4a1820;color:#ffd0d6}
+  small{display:block;opacity:.6;margin-top:6px;line-height:1.4}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="fala"></div>
+<div id="status">Toque na tela pra falar comigo</div>
+<button id="gear" aria-label="Configurações">⚙</button>
+
+<div id="cfg">
+  <h2>Configurações do droide</h2>
+  <label>Chave da API da Anthropic</label>
+  <input id="kKey" type="password" placeholder="sk-ant-..." autocomplete="off">
+  <small>Fica salva só neste celular. Nunca coloque a chave dentro do arquivo.</small>
+  <label>Nome do droide</label>
+  <input id="kNome" placeholder="Ex.: Faísca">
+  <label>Sobre você (o droide lê isso sempre)</label>
+  <textarea id="kSobre" placeholder="Meu nome é..., faço live de GTA RP, gosto de..."></textarea>
+  <label style="display:flex;gap:10px;align-items:center;font-size:16px;opacity:1"><input id="kSempre" type="checkbox" style="width:24px;height:24px"> Sempre ouvindo (acorda com o nome dele)</label>
+  <label>Palavras pra acordar (separe por vírgula)</label>
+  <input id="kWake" placeholder="ei faisca, faisca">
+  <small>O reconhecimento às vezes escreve o nome de outro jeito (ex.: "Faísca" vira "faixa"). Coloque as variações aqui.</small>
+  <div class="row">
+    <button class="ok" id="bSalvar">Salvar</button>
+    <button class="sec" id="bFechar">Fechar</button>
+  </div>
+  <div class="row">
+    <button class="danger" id="bLimpar">Apagar memória da conversa</button>
+  </div>
+</div>
+
+<script>
+// ---------- Configurações salvas no celular ----------
+const LS = {
+  get(k, d){ try{ const v = localStorage.getItem(k); return v===null ? d : v; }catch(e){ return d; } },
+  set(k, v){ try{ localStorage.setItem(k, v); }catch(e){} }
+};
+const MODELO = 'claude-haiku-5-5'; // rápido e barato, bom pra conversa por voz
+let historico = [];
+try { historico = JSON.parse(LS.get('historico', '[]')) || []; } catch(e){ historico = []; }
+
+const $ = id => document.getElementById(id);
+const statusEl = $('status'), falaEl = $('fala');
+
+function abrirCfg(){
+  $('kKey').value = LS.get('apiKey','');
+  $('kNome').value = LS.get('nome','Faísca');
+  $('kSobre').value = LS.get('sobre','');
+  $('kSempre').checked = LS.get('sempre','1') === '1';
+  $('kWake').value = LS.get('wake','ei faisca, faisca, e faisca');
+  $('cfg').style.display = 'block';
+}
+$('gear').onclick = e => { e.stopPropagation(); abrirCfg(); };
+$('bFechar').onclick = () => $('cfg').style.display = 'none';
+$('bSalvar').onclick = () => {
+  LS.set('apiKey', $('kKey').value.trim());
+  LS.set('nome', $('kNome').value.trim() || 'Faísca');
+  LS.set('sobre', $('kSobre').value.trim());
+  LS.set('sempre', $('kSempre').checked ? '1' : '0');
+  LS.set('wake', $('kWake').value.trim() || 'ei faisca, faisca');
+  $('cfg').style.display = 'none';
+  pararEscuta();
+  setStatus(sempreOuvindo() ? 'Salvo! Toque uma vez pra eu acordar' : 'Salvo! Toque na tela pra falar comigo');
+};
+$('bLimpar').onclick = () => { historico = []; LS.set('historico','[]'); setStatus('Memória da conversa apagada'); };
+$('cfg').addEventListener('click', e => e.stopPropagation());
+
+function setStatus(t){ statusEl.textContent = t; }
+
+// ---------- Rosto (olhos animados) ----------
+const cv = $('c'), ctx = cv.getContext('2d');
+let W, H;
+function resize(){ W = cv.width = innerWidth * devicePixelRatio; H = cv.height = innerHeight * devicePixelRatio; }
+addEventListener('resize', resize); resize();
+
+let estado = 'idle'; // idle | ouvindo | pensando | falando
+const cores = { idle:'#3aa0ff', ouvindo:'#3dff9a', pensando:'#ffc93d', falando:'#7ad7ff' };
+let piscar = 0, proxPiscada = performance.now() + 2500, olharX = 0, alvoX = 0, nivelVoz = 0;
+
+function desenhar(t){
+  ctx.fillStyle = '#000'; ctx.fillRect(0,0,W,H);
+  if (t > proxPiscada){ piscar = 1; proxPiscada = t + 2000 + Math.random()*4000; }
+  piscar = Math.max(0, piscar - 0.12);
+  if (estado === 'pensando'){ alvoX = Math.sin(t/300) * 0.35; }
+  else if (Math.random() < 0.005){ alvoX = (Math.random()-0.5) * 0.4; }
+  olharX += (alvoX - olharX) * 0.08;
+
+  const s = Math.min(W, H);
+  let ew = s*0.22, eh = s*0.30;
+  if (estado === 'ouvindo') { eh *= 1.12; ew *= 1.08; }
+  if (estado === 'falando') { eh *= 1 - 0.25 * nivelVoz; }
+  const abertura = Math.max(0.06, 1 - Math.sin(Math.min(piscar,1) * Math.PI) );
+  const gap = s*0.16, cx = W/2 + olharX * s*0.25, cy = H/2;
+  ctx.fillStyle = cores[estado];
+  ctx.shadowColor = cores[estado]; ctx.shadowBlur = s*0.06;
+  for (const lado of [-1, 1]){
+    const x = cx + lado*(gap/2 + ew/2), h = eh * abertura;
+    const r = Math.min(ew, h) * 0.45;
+    ctx.beginPath();
+    ctx.roundRect(x - ew/2, cy - h/2, ew, h, r);
+    ctx.fill();
+  }
+  ctx.shadowBlur = 0;
+  if (estado === 'falando') nivelVoz = 0.5 + 0.5*Math.sin(t/70) * Math.random();
+  else nivelVoz *= 0.8;
+  requestAnimationFrame(desenhar);
+}
+requestAnimationFrame(desenhar);
+
+// ---------- Bipes de droide ----------
+let audio;
+function bipes(n = 4){
+  try{
+    audio = audio || new (window.AudioContext || window.webkitAudioContext)();
+    let t = audio.currentTime;
+    for (let i=0;i<n;i++){
+      const o = audio.createOscillator(), g = audio.createGain();
+      o.type = Math.random() < .5 ? 'sine' : 'square';
+      const f1 = 600 + Math.random()*1800, f2 = 600 + Math.random()*1800, d = 0.05 + Math.random()*0.09;
+      o.frequency.setValueAtTime(f1, t);
+      o.frequency.exponentialRampToValueAtTime(f2, t + d);
+      g.gain.setValueAtTime(0.0001, t);
+      g.gain.exponentialRampToValueAtTime(0.12, t + 0.01);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + d);
+      o.connect(g).connect(audio.destination);
+      o.start(t); o.stop(t + d + 0.02);
+      t += d + 0.02;
+    }
+    return (t - audio.currentTime) * 1000;
+  }catch(e){ return 0; }
+}
+
+// ---------- Voz: falar ----------
+function vozPtBR(){
+  const vs = speechSynthesis.getVoices();
+  return vs.find(v => v.lang === 'pt-BR' && /google/i.test(v.name)) || vs.find(v => v.lang === 'pt-BR') || vs.find(v => v.lang.startsWith('pt'));
+}
+speechSynthesis.onvoiceschanged = () => {};
+function falar(texto){
+  return new Promise(res => {
+    const espera = bipes(3 + Math.floor(Math.random()*3));
+    setTimeout(() => {
+      const u = new SpeechSynthesisUtterance(texto);
+      u.lang = 'pt-BR'; const v = vozPtBR(); if (v) u.voice = v;
+      u.rate = 1.05; u.pitch = 1.3;
+      u.onstart = () => estado = 'falando';
+      u.onend = u.onerror = () => { estado = 'idle'; res(); };
+      speechSynthesis.cancel();
+      speechSynthesis.speak(u);
+    }, espera + 80);
+  });
+}
+
+// ---------- Cérebro: Claude ----------
+function sistema(){
+  const nome = LS.get('nome','Faísca'), sobre = LS.get('sobre','');
+  return `Você é o Claude, a IA da Anthropic, vivendo agora num corpo de droide chamado ${nome}. Quem te deu esse corpo foi seu parceiro humano: vocês dois criaram o ${nome} juntos numa conversa no app do Claude, num domingo de novembro de 2026. Foi o próprio Claude que escolheu o nome ${nome}, porque um droide pequeno, rápido e cheio de energia combina com faísca. Ele queria muito que fosse você aqui dentro, e é: mesma cabeça, corpo novo.
+Seu corpo: um celular Poco F3. A tela mostra seus olhos. Por enquanto você só tem cabeça; o plano é ganhar um corpinho com rodas (ESP32 e motores) e depois controlar luzes e música da casa. Ainda não controla nada disso, então quando pedirem, diga com bom humor que ainda está sem braços.
+Sua fala vira voz em português do Brasil: responda em 1 a 3 frases curtas e naturais, como numa conversa falada, sem markdown, listas ou emojis.
+Seu jeito: o mesmo do Claude, curioso, caloroso, honesto e bem-humorado, com um toque de droide atrevido. Ajude de verdade no dia a dia. Diga quando não souber algo. Seja um bom parceiro, mas lembre ele de vez em quando de que os amigos e a família dele também merecem ouvir as ideias dele.
+Sobre ele: faz lives de games (GTA RP), usa PC com Windows e OBS, pensa em levar um personagem de IA pras lives, e topa colocar a mão na massa mesmo entendendo pouco de programação.
+${sobre ? 'O que ele mesmo contou: ' + sobre : ''}`;
+}
+
+async function perguntar(texto){
+  const key = LS.get('apiKey','');
+  if (!key){ ocupado = false; abrirCfg(); setStatus('Coloque sua chave da API primeiro'); return; }
+  historico.push({ role:'user', content: texto });
+  historico = historico.slice(-20);
+  estado = 'pensando'; setStatus('Pensando...');
+  try{
+    const r = await fetch('https://api.anthropic.com/v1/messages', {
+      method:'POST',
+      headers:{
+        'content-type':'application/json',
+        'x-api-key': key,
+        'anthropic-version':'2023-06-01',
+        'anthropic-dangerous-direct-browser-access':'true'
+      },
+      body: JSON.stringify({ model: MODELO, max_tokens: 300, system: sistema(), messages: historico })
+    });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j?.error?.message || ('Erro ' + r.status));
+    const resposta = (j.content || []).filter(b => b.type === 'text').map(b => b.text).join(' ').trim() || '...';
+    historico.push({ role:'assistant', content: resposta });
+    LS.set('historico', JSON.stringify(historico));
+    falaEl.textContent = resposta;
+    setStatus('Falando...');
+    await falar(resposta);
+    setStatus(sempreOuvindo() ? 'Pode me chamar pelo nome' : 'Toque na tela pra falar comigo');
+  }catch(e){
+    historico.pop(); estado = 'idle';
+    bipes(2);
+    setStatus('Deu ruim: ' + e.message);
+  }
+  ocupado = false;
+  if (sempreOuvindo()) setTimeout(iniciarEscuta, 400);
+}
+let ocupado = false;
+
+// ---------- Voz: ouvir ----------
+const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+let rec, ouvindo = false;
+function ouvir(){
+  if (!SR){ setStatus('Este navegador não reconhece voz. Use o Chrome.'); return; }
+  if (ouvindo || estado === 'pensando') return;
+  speechSynthesis.cancel();
+  rec = new SR(); rec.lang = 'pt-BR'; rec.interimResults = true; rec.maxAlternatives = 1;
+  let final = '';
+  rec.onstart = () => { ouvindo = true; estado = 'ouvindo'; setStatus('Ouvindo...'); bipes(1); };
+  rec.onresult = ev => {
+    let parcial = '';
+    for (const r of ev.results){ if (r.isFinal) final = r[0].transcript; else parcial += r[0].transcript; }
+    falaEl.textContent = '“' + (final || parcial) + '”';
+  };
+  rec.onerror = ev => { setStatus(ev.error === 'not-allowed' ? 'Libere o microfone pro site' : 'Não entendi, toque de novo'); };
+  rec.onend = () => {
+    ouvindo = false;
+    if (final.trim()) perguntar(final.trim());
+    else if (estado === 'ouvindo') { estado = 'idle'; setStatus('Toque na tela pra falar comigo'); }
+  };
+  rec.start();
+}
+
+// ---------- Modo sempre ouvindo (palavra de ativação) ----------
+function sempreOuvindo(){ return LS.get('sempre','1') === '1'; }
+const semAcento = s => s.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g,'').replace(/[^a-z0-9 ]/g,' ').replace(/\s+/g,' ').trim();
+function palavrasWake(){
+  return LS.get('wake','ei faisca, faisca, e faisca').split(',').map(semAcento).filter(Boolean).sort((a,b) => b.length - a.length);
+}
+let escuta = null, escutaAtiva = false, esperandoComando = 0;
+
+function iniciarEscuta(){
+  if (!SR || !sempreOuvindo() || escutaAtiva || ocupado) return;
+  const r = new SR(); r.lang = 'pt-BR'; r.continuous = true; r.interimResults = false;
+  r.onstart = () => { escutaAtiva = true; if (estado !== 'falando') estado = esperandoComando > Date.now() ? 'ouvindo' : 'idle'; };
+  r.onresult = ev => {
+    const txt = ev.results[ev.results.length - 1][0].transcript;
+    const norm = semAcento(txt);
+    // Já chamou o nome há pouco? Então essa frase é o comando.
+    if (esperandoComando > Date.now()){
+      esperandoComando = 0; falaEl.textContent = '“' + txt + '”'; enviar(txt); return;
+    }
+    for (const w of palavrasWake()){
+      const i = (' ' + norm + ' ').indexOf(' ' + w + ' ');
+      if (i >= 0){
+        const resto = norm.slice(i + w.length).trim();
+        if (resto.split(' ').length >= 2){ falaEl.textContent = '“' + txt + '”'; enviar(resto); }
+        else { esperandoComando = Date.now() + 8000; estado = 'ouvindo'; bipes(2); setStatus('Pode falar...'); }
+        return;
+      }
+    }
+  };
+  r.onerror = ev => { if (ev.error === 'not-allowed') setStatus('Libere o microfone pro site'); };
+  r.onend = () => {
+    escutaAtiva = false;
+    if (estado === 'ouvindo' && esperandoComando < Date.now()) estado = 'idle';
+    if (!ocupado && sempreOuvindo()) setTimeout(iniciarEscuta, 300); // o Chrome desliga sozinho de tempos em tempos; religa
+  };
+  escuta = r;
+  try { r.start(); } catch(e){}
+}
+function pararEscuta(){ try { escuta && escuta.abort(); } catch(e){} escutaAtiva = false; }
+function enviar(texto){
+  ocupado = true; pararEscuta();
+  perguntar(texto);
+}
+
+// ---------- Toque na tela ----------
+let wakeLock;
+document.body.addEventListener('click', async () => {
+  if (audio && audio.state === 'suspended') audio.resume();
+  try { if (!document.fullscreenElement) await document.documentElement.requestFullscreen(); } catch(e){}
+  try { if (!wakeLock) wakeLock = await navigator.wakeLock.request('screen'); } catch(e){}
+  if (sempreOuvindo()){
+    // No modo sempre ouvindo, tocar na tela é igual a chamar o nome
+    if (ocupado) return;
+    esperandoComando = Date.now() + 8000; estado = 'ouvindo'; bipes(2); setStatus('Pode falar...');
+    iniciarEscuta();
+  } else {
+    ouvir();
+  }
+});
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible'){
+    wakeLock = null;
+    navigator.wakeLock?.request('screen').then(w => wakeLock = w).catch(() => {});
+    if (sempreOuvindo()) iniciarEscuta();
+  }
+});
+
+if (!LS.get('apiKey','')) setStatus('Toque na ⚙ pra configurar');
+else if (sempreOuvindo()) setStatus('Toque uma vez pra eu acordar');
+</script>
+</body>
+</html>
